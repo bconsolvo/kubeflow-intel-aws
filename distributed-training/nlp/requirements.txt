@@ -1,0 +1,5 @@
+boto3
+tqdm
+tiktoken
+datasets
+transformers==4.24.0
