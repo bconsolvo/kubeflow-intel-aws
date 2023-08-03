@@ -2,8 +2,8 @@ import os
 import boto3
 
 s3 = boto3.client("s3")
-BUCKET = "open-web-text" # <- S3 bucket name here
-PROCESSED_S3_URI = "processed" # <- path inside S3 bucket
+BUCKET = "open-web-text"  # <- S3 bucket name here
+PROCESSED_S3_URI = "processed"  # <- path inside S3 bucket
 
 for split in ["train", "val"]:
     print(f"Downloading {split}.bin . . . . ")

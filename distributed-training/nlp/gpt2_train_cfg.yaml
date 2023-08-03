@@ -1,13 +1,6 @@
 data_dir: ./data/openwebtext
 
-model_config:
-  block_size: 1024
-  n_layer: 12
-  n_head: 12
-  n_embd: 768
-  dropout: 0.0
-  bias: False
-  vocab_size: null
+block_size: 1024
   
 optimizer_config:
   learning_rate: 6e-4
@@ -20,13 +13,14 @@ trainer_config:
   device: cpu
   mixed_precision: bf16 # fp32 or bf16.
   compile: False
-  eval_interval: 4
+  eval_interval: 5
   log_interval: 1
-  eval_iters: 4
+  eval_iters: 2
   eval_only: False
   wandb_log: False
   batch_size: 32
-  max_iters: 20
+  max_iters: 10
+  model_path: ckpt.pt
   snapshot_path: snapshot.pt
   gradient_accumulation_steps: 2 # 1x8 (num_nodes x step)
   grad_clip: 1.0

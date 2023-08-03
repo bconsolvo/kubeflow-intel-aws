@@ -11,8 +11,14 @@ from typing import Any, Dict
 from urllib.parse import urlparse
 from collections import OrderedDict
 from accelerate import Accelerator
+from accelerate.logging import get_logger
 from dataclasses import dataclass, asdict
 import intel_extension_for_pytorch as ipex
+
+logger = get_logger(__name__, log_level="INFO")
+
+def log_info(msg, main_only=False, in_order=False):
+    logger.info(msg, main_process_only=main_only, in_order=in_order)
 
 
 @dataclass
@@ -52,6 +58,19 @@ class Trainer:
             os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
         )
 
+        log_info(
+            f"[RANK {self.accelerator.process_index}] Total training samples (tokens/block_size) : {int(self.train_data.shape[0]/self.block_size)}",
+            main_only=False,
+        )
+        log_info(
+            f"[RANK {self.accelerator.process_index}] Total validation samples (tokens/block_size) : {int(self.val_data.shape[0]/self.block_size)}",
+            main_only=False,
+        )
+        log_info(
+            f"[RANK {self.accelerator.process_index}] One epoch (total_training_samples/batch_size): {int(self.train_data.shape[0]/self.block_size/self.trainer_config.batch_size)} iterations",
+            main_only=False,
+        )
+
         # initialize train states
         self.iter_num = 0
         self.best_val_loss = 1e9
@@ -72,13 +91,13 @@ class Trainer:
         self.model.train()
         self.model, self.optimizer = ipex.optimize(
             self.model,
-            dtype=dtype,
             optimizer=self.optimizer,
+            dtype=dtype,
             inplace=True,
             level="O1",
         )
 
-        # don't use `accelerate.prepare` when model is wrapped in `ipex.optimize`
+        # don't use `accelerator.prepare` when model is wrapped in `ipex.optimize`
         # self.model, self.optimizer = self.accelerator.prepare(
         #     self.model, self.optimizer
         # )
@@ -89,8 +108,9 @@ class Trainer:
             with snapshot as f:
                 snapshot_data = torch.load(f, map_location="cpu")
         except FileNotFoundError:
-            self.accelerator.print(
-                "Snapshot not found. Training model from pretrained gpt2 weights"
+            log_info(
+                f"[RANK {self.accelerator.process_index}] Snapshot not found. Training model from pretrained gpt2 weights",
+                main_only=False,
             )
             return
 
@@ -99,8 +119,9 @@ class Trainer:
         self.optimizer.load_state_dict(snapshot.optimizer_state)
         self.iter_num = snapshot.iter_num
         self.best_val_loss = snapshot.best_val_loss
-        self.accelerator.print(
-            f"Resuming training from snapshot: Completed {self.iter_num} iterations | Best Val loss {self.best_val_loss}"
+        log_info(
+            f"[RANK {self.accelerator.process_index}] Resuming training from snapshot: Completed {self.iter_num} iterations | Best Val loss {self.best_val_loss}",
+            main_only=False,
         )
 
     def _save_snapshot(self, iter_num):
@@ -112,15 +133,14 @@ class Trainer:
             iter_num=iter_num,
             best_val_loss=self.best_val_loss,
         )
-
         # save snapshot
         snapshot = asdict(snapshot)
         if self.trainer_config.snapshot_path.startswith("s3://"):
             upload_to_s3(snapshot, self.trainer_config.snapshot_path)
         else:
             torch.save(snapshot, self.trainer_config.snapshot_path)
-
-        self.accelerator.print(f"Snapshot saved at {iter_num} iteration")
+            torch.save(snapshot["model_state"], self.trainer_config.model_path)
+        log_info(f"[RANK {self.accelerator.process_index}] Snapshot saved at {iter_num} iteration", main_only=True)
 
     def get_batch(self, split):
         data = self.train_data if split == "train" else self.val_data
@@ -197,13 +217,14 @@ class Trainer:
                 and self.master_process
             ):
                 losses = self.estimate_loss()
-                self.accelerator.print(
-                    f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}"
+                log_info(
+                    f"[RANK {self.accelerator.process_index}] eval: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}",
+                    main_only=False,
                 )
 
                 if losses["val"] < self.best_val_loss:
-                    self.best_val_loss = losses["val"]
                     if iter_num > 0:
+                        self.best_val_loss = losses["val"]
                         self._save_snapshot(iter_num)
 
             if self.trainer_config.eval_only:
@@ -215,28 +236,33 @@ class Trainer:
                 with self.autocast_ctx_manager:
                     _, loss = self.model(X, Y)
                 self.accelerator.backward(loss)
-                loss = loss.detach() / self.trainer_config.gradient_accumulation_steps
+                loss = loss.detach()
 
-            # gradient clipping
-            self.accelerator.clip_grad_norm_(
-                self.model.parameters(), self.trainer_config.grad_clip
-            )
+                # gradient clipping
+                self.accelerator.clip_grad_norm_(
+                    self.model.parameters(), self.trainer_config.grad_clip
+                )
 
-            # optimizer step
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
+                # optimizer step
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
 
             # timing and logging
             t1 = time.time()
             dt = t1 - t0
             t0 = t1
             if iter_num % self.trainer_config.log_interval == 0 and self.master_process:
-                self.accelerator.print(
-                    f"iter {iter_num}: loss {loss:.4f}, time {dt:.2f}s"
+                log_info(
+                    f"[RANK {self.accelerator.process_index}] iter {iter_num}: loss {loss:.4f}, time {dt:.2f}s",
+                    main_only=False,
                 )
 
             # termination conditions
             if iter_num > self.trainer_config.max_iters:
+                log_info(
+                    f"[RANK {self.accelerator.process_index}] Total Samples used for training: {iter_num*self.trainer_config.batch_size}",
+                    main_only=False,
+                )
                 break
 
             iter_num += 1

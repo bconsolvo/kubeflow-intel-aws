@@ -2,15 +2,19 @@
 # https://github.com/HazyResearch/flash-attention/blob/main/training/src/datamodules/language_modeling_hf.py
 
 import os
-from tqdm import tqdm
-import numpy as np
+import argparse
 import tiktoken
+import numpy as np
+from tqdm import tqdm
 from datasets import load_dataset
 
-UPLOAD_TO_S3 = True # set `False` to turn OFF all S3 code
+parser = argparse.ArgumentParser()
+parser.add_argument("--full", action="store_true")
+parser.add_argument("--upload-to-s3", action="store_true")
+args = parser.parse_args()
 
 
-if UPLOAD_TO_S3:
+if args.upload_to_s3:
     import s3fs
     import boto3
     import aiobotocore.session
@@ -20,17 +24,20 @@ if UPLOAD_TO_S3:
     storage_options = {"session": s3_session}
     fs = s3fs.S3FileSystem(**storage_options)
     s3 = boto3.resource("s3")
-    owt_bucket = s3.Bucket("open-web-text") # <- your bucket name here
-    ARROW_S3_URI = "s3://open-web-text/dataset" # <- raw arrow dataset S3_URI
-    PROCESSED_S3_URI = "processed" # <- processed BIN files S3_URI
+    owt_bucket = s3.Bucket("open-web-text")  # <- your bucket name here
+    ARROW_S3_URI = "s3://open-web-text/dataset"  # <- raw arrow dataset S3_URI
+    PROCESSED_S3_URI = "processed"  # <- processed BIN files S3_URI
 
 # number of workers in .map() call
 # good number to use is ~order number of cpu cores // 2
 num_proc = 8
 
 # takes 54GB in huggingface .cache dir, about 8M documents (8,013,769)
-dataset = load_dataset("openwebtext", num_proc=num_proc)
-if UPLOAD_TO_S3 and len(fs.ls(ARROW_S3_URI, detail=False)) == 0:
+if not args.full:
+    print("Downloading only 10K sample from Ankursingh/openwebtext_10K")
+dataset_uri = "Ankursingh/openwebtext_10K" if not args.full else "openwebtext"
+dataset = load_dataset(dataset_uri, num_proc=num_proc)
+if args.upload_to_s3 and len(fs.ls(ARROW_S3_URI, detail=False)) == 0:
     print("Uploading OpenWebText Dataset from S3 . . . . ")
     dataset.save_to_disk(ARROW_S3_URI, storage_options=fs.storage_options)
 
@@ -82,7 +89,7 @@ for split, dset in tokenized.items():
     filename = os.path.join(os.path.dirname(__file__), f"{split}.bin")
     dtype = np.uint16  # (can do since enc.max_token_value == 50256 is < 2**16)
     arr = np.memmap(filename, dtype=dtype, mode="w+", shape=(arr_len,))
-    total_batches = 1024
+    total_batches = 4 if not args.full else 1024
 
     idx = 0
     for batch_idx in tqdm(range(total_batches), desc=f"writing {filename}"):
@@ -96,7 +103,7 @@ for split, dset in tokenized.items():
         idx += len(arr_batch)
     arr.flush()
 
-    if UPLOAD_TO_S3:
+    if args.upload_to_s3:
         owt_bucket.upload_file(filename, f"{PROCESSED_S3_URI}/{split}.bin")
 
 # train.bin is ~17GB, val.bin ~8.5MB
